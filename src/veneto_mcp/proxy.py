@@ -18,6 +18,7 @@ expire in an hour and cannot be refreshed). Here instead:
 """
 
 import contextvars
+import hashlib
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -147,6 +148,11 @@ class SignInProxy(OAuthProxy):
             raise ValueError("veneto-mcp refuses FASTMCP_SSRF_TRUST_PROXY")
         if not jwt_signing_key or len(jwt_signing_key) < 32:
             raise ValueError("jwt_signing_key must be at least 32 characters")
+        if isinstance(jwt_signing_key, str):
+            # A high-entropy secret needs no stretching (FastMCP would PBKDF2 a str 1M times).
+            jwt_signing_key = hashlib.sha256(
+                b"veneto-mcp jwt v1\0" + jwt_signing_key.encode()
+            ).digest()
         self._login = login
         self._sign_in = sign_in
         self._resolve_grant = resolve

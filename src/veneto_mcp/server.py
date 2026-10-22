@@ -1,6 +1,6 @@
 """`build_mcp`: a FastMCP server behind the sign-in proxy, and how to mount it in a FastAPI app."""
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any
@@ -17,6 +17,16 @@ from veneto_mcp.proxy import Resolve, SignIn, SignInProxy
 
 #: What a tool says when the caller has no (more) access. Same for every reason.
 DENIED = "Acesso negado"
+
+#: Where the usual MCP clients receive their authorization code: claude.ai (web, desktop and
+#: mobile all use it), ChatGPT's connectors, and loopback (Claude Code, MCP Inspector, scripts).
+DEFAULT_REDIRECT_URIS = (
+    "https://claude.ai/api/mcp/auth_callback",
+    "https://claude.com/api/mcp/auth_callback",
+    "https://chatgpt.com/connector_platform_oauth_redirect",
+    "http://localhost:*",
+    "http://127.0.0.1:*",
+)
 
 
 def current_grant() -> str:
@@ -99,6 +109,7 @@ def build_mcp(
     path: str = "/mcp",
     access_token_ttl_seconds: int = 3600,
     refresh_token_ttl_seconds: int = 90 * 24 * 3600,
+    allowed_redirect_uris: Sequence[str] = DEFAULT_REDIRECT_URIS,
 ) -> RemoteMCP:
     """A remote MCP server at `<base_url><path>`, protected by OAuth 2.1 (metadata, DCR and
     CIMD for clients; consent screen; PKCE), where people sign in with `login` once per
@@ -113,7 +124,9 @@ def build_mcp(
     `storage` holds the OAuth state: use `encrypted(SQLStore(...), secret)` in production.
     `jwt_signing_key` (>= 32 chars) signs the tokens clients hold; rotating it signs everyone
     out of their connectors. Access tokens live `access_token_ttl_seconds`; refresh tokens
-    rotate on use and lapse after `refresh_token_ttl_seconds` without one.
+    rotate on use and lapse after `refresh_token_ttl_seconds` without one. Only clients whose
+    redirect URI matches `allowed_redirect_uris` (wildcards: `http://localhost:*`) may register
+    or sign in, so nobody can phish a code to a site of their own.
     """
     if not base_url.startswith("https://") and "://localhost" not in base_url:
         raise ValueError("base_url must be https (or localhost)")
@@ -126,6 +139,7 @@ def build_mcp(
         jwt_signing_key=jwt_signing_key,
         access_token_ttl_seconds=access_token_ttl_seconds,
         refresh_token_ttl_seconds=refresh_token_ttl_seconds,
+        allowed_redirect_uris=list(allowed_redirect_uris),
     )
     server = FastMCP(name, instructions=instructions, auth=auth)
     return RemoteMCP(server=server, path=path, _resolve=resolve)

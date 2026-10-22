@@ -119,7 +119,7 @@ class SignInFlow:
         self,
         client: httpx.AsyncClient,
         *,
-        redirect_uri: str = "https://client.test/callback",
+        redirect_uri: str = "http://localhost:33418/callback",
         client_name: str = "Test client",
         callback_path: str = "/oauth/callback",
     ) -> None:
@@ -131,6 +131,8 @@ class SignInFlow:
         self._verifier, self._challenge = _pkce()
         self._state = secrets.token_urlsafe(8)
         self.upstream_state: str | None = None
+        #: RFC 8707, as claude.ai sends it.
+        self.resource = str(client.base_url).rstrip("/") + "/mcp"
 
     async def register(self) -> str:
         response = await self.client.post(
@@ -161,6 +163,7 @@ class SignInFlow:
                 "code_challenge": self._challenge,
                 "code_challenge_method": "S256",
                 "state": self._state,
+                "resource": self.resource,
             },
         )
         assert authorize.status_code in (302, 307), authorize.text
@@ -201,6 +204,7 @@ class SignInFlow:
                 "redirect_uri": self.redirect_uri,
                 "client_id": self.client_id,
                 "code_verifier": self._verifier,
+                "resource": self.resource,
             },
         )
         assert response.status_code == 200, response.text

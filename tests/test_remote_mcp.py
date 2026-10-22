@@ -211,3 +211,36 @@ def test_refuses_to_run_cimd_without_the_ssrf_blocklist(db, monkeypatch):
     monkeypatch.setattr(fastmcp.settings, "ssrf_trust_proxy", True)
     with pytest.raises(ValueError, match="SSRF"):
         _build(db)
+
+
+async def test_a_callback_without_a_pending_sign_in_is_refused_too(client):
+    response = await client.get("/oauth/callback", params={"code": "c", "state": "forged"})
+    assert (response.status_code, response.text) == (403, DENIED_HTML)
+
+
+async def test_an_app_sign_in_that_raises_is_a_bare_refusal(client, provider, users, caplog):
+    users.broken = True
+    provider.next_claims = {"id": ALICE}
+    flow = SignInFlow(client)
+    await flow.approve()
+    response = await flow.callback()
+    assert (response.status_code, response.text) == (403, DENIED_HTML)
+    assert "connector: Alice" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    "redirect_uri",
+    ["https://evil.test/callback", "https://claude.ai.evil.test/api/mcp/auth_callback"],
+)
+async def test_a_client_with_a_foreign_redirect_uri_cannot_register(client, redirect_uri):
+    response = await client.post(
+        "/register",
+        json={"redirect_uris": [redirect_uri], "token_endpoint_auth_method": "none"},
+    )
+    assert response.status_code == 400
+
+
+async def test_claude_ai_and_loopback_clients_can_register(client):
+    for redirect_uri in ("https://claude.ai/api/mcp/auth_callback", "http://127.0.0.1:5000/cb"):
+        flow = SignInFlow(client, redirect_uri=redirect_uri)
+        assert await flow.register()

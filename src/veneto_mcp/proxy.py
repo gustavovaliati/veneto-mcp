@@ -96,9 +96,20 @@ class _SignInUpstream:
     """What OAuthProxy uses as its upstream token client: the code exchange goes to the
     provider for real and comes back as the app's grant; refreshes never leave the server."""
 
-    def __init__(self, proxy: SignInProxy, real: AsyncOAuth2Client) -> None:
-        self._proxy = proxy
+    def __init__(
+        self,
+        real: AsyncOAuth2Client,
+        *,
+        login: OIDCLogin,
+        sign_in: SignIn,
+        resolve: Resolve,
+        grant_tokens: Callable[[str], dict[str, Any]],
+    ) -> None:
         self._real = real
+        self._login = login
+        self._sign_in = sign_in
+        self._resolve = resolve
+        self._grant_tokens = grant_tokens
         self.client_id = real.client_id
         self.client_secret = real.client_secret
 
@@ -107,24 +118,31 @@ class _SignInUpstream:
 
     async def fetch_token(self, url: str, **params: Any) -> dict[str, Any]:
         state = _callback.get()
-        tokens = await self._real.fetch_token(url=url, **params)
-        grant = None
-        identity = await self._proxy._login.verify(tokens)
-        if identity is not None and state is not None and state.client is not None:
-            grant = await self._proxy._sign_in(identity, state.client)
+        try:
+            tokens = await self._real.fetch_token(url=url, **params)
+            identity = await self._login.verify(tokens)
+            grant = None
+            if identity is not None and state is not None and state.client is not None:
+                grant = await self._sign_in(identity, state.client)
+        except Exception as error:
+            # Whatever failed (the provider, the app's sign_in), the browser sees only the
+            # bare 403; the log gets the exception's type, never its text (it could carry a
+            # name or a token).
+            logger.warning("sign-in failed: %s", type(error).__name__)
+            grant = None
         if not grant:
             if state is not None:
                 state.refused = True
             raise SignInRefused
-        return self._proxy.grant_tokens(grant)
+        return self._grant_tokens(grant)
 
     async def refresh_token(
         self, url: str, *, refresh_token: str | None = None, **params: Any
     ) -> dict[str, Any]:
         del url, params
-        if not refresh_token or await self._proxy._resolve_grant(refresh_token) is None:
+        if not refresh_token or await self._resolve(refresh_token) is None:
             raise OAuthError(error="invalid_grant")
-        return self._proxy.grant_tokens(refresh_token)
+        return self._grant_tokens(refresh_token)
 
 
 class SignInProxy(OAuthProxy):
@@ -142,7 +160,10 @@ class SignInProxy(OAuthProxy):
         jwt_signing_key: str | bytes,
         access_token_ttl_seconds: int,
         refresh_token_ttl_seconds: int,
+        allowed_redirect_uris: list[str],
     ) -> None:
+        if not allowed_redirect_uris:
+            raise ValueError("allowed_redirect_uris must name at least one client callback")
         if fastmcp.settings.ssrf_trust_proxy:
             # CIMD fetches URLs that clients name; never without the DNS/IP blocklist.
             raise ValueError("veneto-mcp refuses FASTMCP_SSRF_TRUST_PROXY")
@@ -167,6 +188,9 @@ class SignInProxy(OAuthProxy):
             base_url=base_url,
             redirect_path=login.redirect_path,
             valid_scopes=list(login.scopes),
+            # Only these clients may receive a code: without it, any site could register its
+            # own redirect URI and phish a Member into approving it.
+            allowed_client_redirect_uris=list(allowed_redirect_uris),
             # The provider gets exactly the scopes it needs to identify someone, whatever the
             # MCP client asked for; no RFC 8707 `resource` (OIDC providers don't take it).
             extra_authorize_params={"scope": " ".join(login.scopes)},
@@ -197,7 +221,13 @@ class SignInProxy(OAuthProxy):
         )
         if self._login.transport is not None:
             real._client = httpx2.AsyncClient(timeout=15, transport=self._login.transport)
-        return _SignInUpstream(self, real)
+        return _SignInUpstream(
+            real,
+            login=self._login,
+            sign_in=self._sign_in,
+            resolve=self._resolve_grant,
+            grant_tokens=self.grant_tokens,
+        )
 
     def _prepare_scopes_for_token_exchange(self, scopes: list[str]) -> list[str]:
         del scopes
@@ -205,6 +235,9 @@ class SignInProxy(OAuthProxy):
 
     async def _handle_idp_callback(self, request: Request) -> HTMLResponse | RedirectResponse:
         state = _Callback(client=await self._connector_client(request))
+        if state.client is None:
+            # No pending sign-in behind this `state` (expired, forged, replayed).
+            return HTMLResponse(DENIED_HTML, status_code=403)
         token = _callback.set(state)
         try:
             response = await super()._handle_idp_callback(request)

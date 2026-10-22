@@ -33,9 +33,13 @@ class Users:
     active: set[int] = field(default_factory=lambda: {ALICE, BOB})
     grants: dict[str, int] = field(default_factory=dict)
     sign_ins: list[tuple[Identity, ConnectorClient]] = field(default_factory=list)
+    #: Make sign_in raise (the app's database is down, say).
+    broken: bool = False
 
     async def sign_in(self, identity: Identity, client: ConnectorClient) -> str | None:
         self.sign_ins.append((identity, client))
+        if self.broken:
+            raise RuntimeError("db down, token connector: Alice")
         user = int(identity.subject)
         if user not in self.active:
             return None

@@ -5,8 +5,12 @@ description = "A remote, OAuth-protected MCP endpoint for a FastAPI app: sign in
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
-    # Pinned: the sign-in proxy overrides two of OAuthProxy's documented hooks
-    # (`_create_upstream_oauth_client`, `_handle_idp_callback`); bump deliberately, with the tests.
+    # Pinned: the sign-in proxy (proxy.py) leans on OAuthProxy internals: it overrides
+    # `_create_upstream_oauth_client` (a documented override point), `_handle_idp_callback` and
+    # `_prepare_scopes_for_token_exchange`, reads `_upstream_client_id`,
+    # `_token_endpoint_auth_method` and `_transaction_store`, and sets the upstream client's
+    # `_client`; storage.py imports `key_value.aio._utils.managed_entry`. Bump deliberately: the
+    # tests drive the real flow end to end, so a changed internal fails them.
     "fastmcp==4.1.3",
     "sqlalchemy[asyncio]>=2.0",
     "cryptography",

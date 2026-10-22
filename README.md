@@ -55,6 +55,12 @@ The connector URL is then `https://myapp.example.com/mcp`.
 - Tools: `await remote.principal()` (resolved again), or `current_grant()` for the raw grant (e.g. to
   call your own HTTP API in process with it, so every route's checks apply unchanged).
 
+## Which clients may connect
+
+Only clients whose redirect URI matches `allowed_redirect_uris` may register or sign in. The default is
+claude.ai's and ChatGPT's callbacks plus loopback (Claude Code, MCP Inspector). Without that list, anyone
+could register a redirect URI of their own and phish a user into approving it on the consent screen.
+
 ## Paths `mount` adds
 
 `/mcp`, `/.well-known/oauth-authorization-server`, `/.well-known/oauth-protected-resource/mcp`,

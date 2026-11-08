@@ -3,6 +3,8 @@ name = "veneto-mcp"
 version = "0.1.0"
 description = "A remote, OAuth-protected MCP endpoint for a FastAPI app: sign in upstream once, the app decides who gets in."
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.14"
 dependencies = [
     # Pinned: the sign-in proxy (proxy.py) leans on OAuthProxy internals: it overrides

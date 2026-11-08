@@ -1,6 +1,6 @@
 [project]
 name = "veneto-mcp"
-version = "0.1.0"
+version = "0.1.1"
 description = "A remote, OAuth-protected MCP endpoint for a FastAPI app: sign in upstream once, the app decides who gets in."
 readme = "README.md"
 license = "MIT"

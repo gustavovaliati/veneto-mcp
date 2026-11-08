@@ -5,18 +5,27 @@ that comes back; `identity` turns the verified claims into an `Identity`, or Non
 `telegram()` and `google()` are presets; any other OIDC provider is one more `OIDCLogin`.
 """
 
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from functools import cached_property
 from typing import Any
 
 import httpx2
 from fastmcp.server.auth.providers.jwt import JWTVerifier
 
+#: Leeway between our clock and the provider's, in seconds.
+CLOCK_SKEW_SECONDS = 60
+#: An ID token issued longer ago than this is refused, whatever its `exp` says. It arrives over
+#: the back channel seconds after it is issued, so this only bounds a token replayed later.
+MAX_ID_TOKEN_AGE_SECONDS = 600
+
 
 @dataclass(frozen=True)
 class Identity:
-    """Who signed in, as the upstream provider vouched for it (signature, issuer, audience and
-    expiry of its ID token checked). `subject` is the provider's stable id for the person."""
+    """Who signed in, as the upstream provider vouched for it (signature, issuer, audience,
+    expiry and issue time of its ID token checked). `subject` is the provider's stable id for
+    the person."""
 
     provider: str
     subject: str
@@ -58,6 +67,12 @@ class OIDCLogin:
             raise ValueError(f"{self.provider}: the openid scope is required")
 
     def id_token_verifier(self) -> JWTVerifier:
+        """One verifier per login, so the provider's JWKS is fetched once and cached, not on
+        every sign-in."""
+        return self._verifier
+
+    @cached_property
+    def _verifier(self) -> JWTVerifier:
         return JWTVerifier(
             jwks_uri=None if self.public_key else self.jwks_uri,
             public_key=self.public_key,
@@ -74,7 +89,23 @@ class OIDCLogin:
         verified = await self.id_token_verifier().verify_token(id_token)
         if verified is None or not verified.claims:
             return None
-        return self.identity(dict(verified.claims))
+        claims = dict(verified.claims)
+        if not _fresh(claims, time.time()):
+            return None
+        return self.identity(claims)
+
+
+def _fresh(claims: dict[str, Any], now: float) -> bool:
+    """`exp` and `iat` are both required (the verifier checks `exp` only when present): not
+    expired, not issued in the future, not issued more than MAX_ID_TOKEN_AGE_SECONDS ago."""
+    exp, iat = claims.get("exp"), claims.get("iat")
+    if any(isinstance(v, bool) or not isinstance(v, int | float) for v in (exp, iat)):
+        return False
+    return (
+        exp > now - CLOCK_SKEW_SECONDS
+        and iat <= now + CLOCK_SKEW_SECONDS
+        and iat >= now - MAX_ID_TOKEN_AGE_SECONDS - CLOCK_SKEW_SECONDS
+    )
 
 
 TELEGRAM_ISSUER = "https://oauth.telegram.org"

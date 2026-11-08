@@ -1,6 +1,8 @@
 """The sign-in flow and the token checks, at the HTTP seam."""
 
 import json
+import time
+from datetime import UTC, datetime
 
 import pytest
 from fastmcp.exceptions import ToolError
@@ -81,7 +83,17 @@ async def test_upstream_is_asked_for_openid_profile_with_pkce_and_basic_auth(cli
 
 @pytest.mark.parametrize(
     "case",
-    ["stranger", "no id claim", "foreign signature", "wrong audience", "expired", "no id token"],
+    [
+        "stranger",
+        "no id claim",
+        "foreign signature",
+        "wrong audience",
+        "expired",
+        "no expiry",
+        "issued in the future",
+        "issued long ago",
+        "no id token",
+    ],
 )
 async def test_every_refused_sign_in_gets_the_same_bare_403(client, provider, users, case):
     claims = {"id": ALICE}
@@ -95,6 +107,13 @@ async def test_every_refused_sign_in_gets_the_same_bare_403(client, provider, us
         provider.next_id_token = provider.id_token(claims | {"aud": "another-bot"})
     elif case == "expired":
         provider.next_id_token = provider.id_token(claims | {"expires_in": -60})
+    elif case == "no expiry":
+        provider.next_id_token = provider.id_token(claims | {"exp": None})
+    elif case == "issued in the future":
+        provider.next_id_token = provider.id_token(claims | {"iat": int(time.time()) + 3600})
+    elif case == "issued long ago":
+        # Still unexpired, but issued an hour ago: a replayed token, not a fresh sign-in.
+        provider.next_id_token = provider.id_token(claims | {"iat": int(time.time()) - 3600})
     elif case == "no id token":
         provider.next_id_token = ""
     provider.next_claims = claims
@@ -200,9 +219,27 @@ def test_refuses_a_short_signing_key(db):
         _build(db, jwt_signing_key="short")
 
 
-def test_refuses_plain_http(db):
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        "http://mcp.test",
+        "http://localhost.evil.test",
+        "http://mcp.test/?x=://localhost",
+        "http://localhost@evil.test",
+        "ftp://localhost",
+        "https://",
+    ],
+)
+def test_refuses_plain_http(db, base_url):
     with pytest.raises(ValueError, match="https"):
-        _build(db, base_url="http://mcp.test")
+        _build(db, base_url=base_url)
+
+
+@pytest.mark.parametrize(
+    "base_url", ["https://mcp.test", "http://localhost:8100", "http://127.0.0.1:8100"]
+)
+def test_accepts_https_and_loopback_http(db, base_url):
+    assert _build(db, base_url=base_url).path == "/mcp"
 
 
 def test_refuses_to_run_cimd_without_the_ssrf_blocklist(db, monkeypatch):
@@ -244,3 +281,51 @@ async def test_claude_ai_and_loopback_clients_can_register(client):
     for redirect_uri in ("https://claude.ai/api/mcp/auth_callback", "http://127.0.0.1:5000/cb"):
         flow = SignInFlow(client, redirect_uri=redirect_uri)
         assert await flow.register()
+
+
+async def _client_expiry(db, client_id: str) -> float:
+    """Seconds until the stored DCR registration of `client_id` expires."""
+    t = db.table
+    async with db.engine.connect() as conn:
+        expires_at = (
+            await conn.execute(
+                select(t.c.expires_at).where(
+                    t.c.collection == "mcp-oauth-proxy-clients", t.c.key == client_id
+                )
+            )
+        ).scalar_one()
+    assert expires_at is not None, "a registration must never be stored forever"
+    return (expires_at.replace(tzinfo=UTC) - datetime.now(UTC)).total_seconds()
+
+
+async def test_an_unused_registration_expires_within_the_hour(client, db):
+    client_id = await SignInFlow(client).register()
+    assert 3500 < await _client_expiry(db, client_id) <= 3600
+
+
+async def test_a_used_registration_lives_as_long_as_its_refresh_token(client, provider, db):
+    flow = SignInFlow(client)
+    provider.next_claims = {"id": ALICE}
+    tokens = await flow.connect()
+    ninety_days = 90 * 24 * 3600
+    assert ninety_days - 100 < await _client_expiry(db, flow.client_id) <= ninety_days
+    refreshed = await flow.refresh(tokens["refresh_token"])
+    assert refreshed.status_code == 200, refreshed.text
+    assert ninety_days - 100 < await _client_expiry(db, flow.client_id) <= ninety_days
+
+
+async def test_a_refused_sign_in_leaves_no_pending_transaction(client, provider, db):
+    provider.next_claims = {"id": STRANGER}
+    flow = SignInFlow(client)
+    await flow.approve()
+    assert (await flow.callback()).status_code == 403
+    t = db.table
+    async with db.engine.connect() as conn:
+        pending = (
+            await conn.execute(
+                select(t.c.key).where(
+                    t.c.collection == "mcp-oauth-transactions", t.c.key == flow.upstream_state
+                )
+            )
+        ).first()
+    assert pending is None

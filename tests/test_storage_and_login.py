@@ -5,7 +5,7 @@ import asyncio
 import pytest
 
 from veneto_mcp import encrypted, google, telegram
-from veneto_mcp.login import OIDCLogin
+from veneto_mcp.login import CLOCK_SKEW_SECONDS, MAX_ID_TOKEN_AGE_SECONDS, OIDCLogin, _fresh
 from veneto_mcp.storage import fernet_key
 
 
@@ -74,3 +74,32 @@ def test_a_login_needs_credentials_keys_and_openid():
 
 def test_the_client_secret_is_not_in_the_repr():
     assert "s3cr3t" not in repr(telegram("1", "s3cr3t"))
+
+
+def test_one_verifier_per_login_so_the_jwks_is_cached():
+    login = telegram("1", "s")
+    assert login.id_token_verifier() is login.id_token_verifier()
+
+
+@pytest.mark.parametrize(
+    ("claims", "fresh"),
+    [
+        ({"exp": 1_000_600, "iat": 1_000_000}, True),
+        ({"exp": 1_000_000 - CLOCK_SKEW_SECONDS + 1, "iat": 999_900}, True),
+        ({"iat": 1_000_000}, False),
+        ({"exp": 1_000_600}, False),
+        ({"exp": "1000600", "iat": 1_000_000}, False),
+        ({"exp": True, "iat": 1_000_000}, False),
+        ({"exp": 999_000, "iat": 998_000}, False),
+        ({"exp": 1_005_000, "iat": 1_000_000 + CLOCK_SKEW_SECONDS + 1}, False),
+        (
+            {
+                "exp": 1_005_000,
+                "iat": 1_000_000 - MAX_ID_TOKEN_AGE_SECONDS - CLOCK_SKEW_SECONDS - 1,
+            },
+            False,
+        ),
+    ],
+)
+def test_an_id_token_needs_a_live_exp_and_a_recent_iat(claims, fresh):
+    assert _fresh(claims, now=1_000_000) is fresh

@@ -88,6 +88,30 @@ restart, nothing to stream), but turn proxy buffering off for it anyway.
 - CIMD fetches client-named URLs through FastMCP's SSRF guard (DNS-pinned, private ranges blocked);
   `build_mcp` refuses to start with `FASTMCP_SSRF_TRUST_PROXY` set.
 
+## Security notes for adopters
+
+- **Rate-limit the OAuth routes at your reverse proxy** (`/register`, `/authorize`, `/consent`,
+  `/token`, the provider's callback). Dynamic Client Registration is open to anyone, by design.
+  A registration that no sign-in completes with is deleted after an hour; a used one lives as
+  long as its refresh token could, renewed on every refresh.
+- **`ConnectorClient.name` is chosen by whoever registered the client.** Treat it as untrusted
+  text: escape it before showing it, and never use it to decide anything.
+- **Keep the `fastmcp` logger above DEBUG in production.** At DEBUG, FastMCP logs full
+  authorization codes.
+- **Never configure an upstream revocation endpoint.** The grant stands in for the upstream
+  tokens, so FastMCP would send your app's grant (an API token, say) to the provider.
+  Disconnecting a connector means revoking its grant in your app: `resolve` then returns None.
+- **The storage protects confidentiality, not integrity.** Values are Fernet-encrypted, but a
+  ciphertext is not bound to the collection and key it was stored under, keys are stored in
+  plain text, and an unencrypted value is read back as is. Someone who can write to the table
+  (but holds no app secret) could move one person's stored grant under the key of their own
+  token. Keep the table as protected as the rest of your database.
+- **One-time use is FastMCP's.** Redeeming an authorization code and rotating a refresh token
+  are a read then a delete, so two simultaneous requests could both succeed; reusing an old
+  refresh token is refused but does not revoke the newer one.
+- ID tokens are checked for signature, issuer, audience, `exp` and `iat` (both required; issued
+  at most ten minutes ago, with a minute of clock skew).
+
 ## Testing your app
 
 `veneto_mcp.testing` (extra `testing`) has a `FakeProvider` (an ID-token-signing token endpoint over
@@ -103,5 +127,5 @@ uv run pytest -q
 uv run ruff check . && uv run ruff format --check .
 ```
 
-Releases are git tags (`v0.1.0`); apps depend on a tag:
-`veneto-mcp = { git = "https://github.com/gustavovaliati/veneto-mcp", tag = "v0.1.0" }`.
+Releases are git tags (`v0.1.1`); apps depend on a tag:
+`veneto-mcp = { git = "https://github.com/gustavovaliati/veneto-mcp", tag = "v0.1.1" }`.

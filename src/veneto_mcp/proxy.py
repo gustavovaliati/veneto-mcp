@@ -51,6 +51,11 @@ class ConnectorClient:
 SignIn = Callable[[Identity, ConnectorClient], Awaitable[str | None]]
 Resolve = Callable[[str], Awaitable[Any | None]]
 
+#: A client registration (DCR, open to anyone) that no sign-in completes with is deleted after
+#: this. Once a connector exchanges a code, its registration lives as long as its refresh token
+#: could, renewed on every refresh, so unused registrations cannot pile up in the database.
+UNUSED_CLIENT_TTL_SECONDS = 3600
+
 #: The only thing a refused sign-in ever sees, whatever the reason.
 DENIED_HTML = (
     '<!doctype html><html lang="pt-BR"><meta charset="utf-8">'
@@ -201,6 +206,31 @@ class SignInProxy(OAuthProxy):
             enable_cimd=True,
         )
 
+    async def register_client(self, client_info: Any) -> None:
+        await super().register_client(client_info)
+        await self._expire_client(client_info.client_id, UNUSED_CLIENT_TTL_SECONDS)
+
+    async def exchange_authorization_code(self, client: Any, authorization_code: Any) -> Any:
+        token = await super().exchange_authorization_code(client, authorization_code)
+        await self._expire_client(client.client_id, self._refresh_ttl)
+        return token
+
+    async def exchange_refresh_token(
+        self, client: Any, refresh_token: Any, scopes: list[str]
+    ) -> Any:
+        token = await super().exchange_refresh_token(client, refresh_token, scopes)
+        await self._expire_client(client.client_id, self._refresh_ttl)
+        return token
+
+    async def _expire_client(self, client_id: str | None, ttl: int) -> None:
+        """Re-store a DCR registration with a TTL (FastMCP stores them forever). CIMD and
+        synthesized clients are not in the store and are left alone."""
+        if not client_id:
+            return
+        stored = await self._client_store.get(key=client_id)
+        if stored is not None:
+            await self._client_store.put(key=client_id, value=stored, ttl=ttl)
+
     def grant_tokens(self, grant: str) -> dict[str, Any]:
         """The grant, shaped as the upstream token response OAuthProxy stores (encrypted). No
         `scope`: the FastMCP tokens keep the scopes the client was granted."""
@@ -244,6 +274,11 @@ class SignInProxy(OAuthProxy):
         finally:
             _callback.reset(token)
         if state.refused:
+            # FastMCP deletes the pending sign-in only on success; a refused one would linger
+            # for its 15 minutes.
+            txn_id = request.query_params.get("state")
+            if txn_id:
+                await self._transaction_store.delete(key=txn_id)
             return HTMLResponse(DENIED_HTML, status_code=403)
         return response
 

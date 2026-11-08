@@ -4,6 +4,7 @@ from collections.abc import AsyncIterator, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import urlsplit
 
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
@@ -128,8 +129,8 @@ def build_mcp(
     redirect URI matches `allowed_redirect_uris` (wildcards: `http://localhost:*`) may register
     or sign in, so nobody can phish a code to a site of their own.
     """
-    if not base_url.startswith("https://") and "://localhost" not in base_url:
-        raise ValueError("base_url must be https (or localhost)")
+    if not _secure_base_url(base_url):
+        raise ValueError("base_url must be https (or http on a loopback host)")
     auth = SignInProxy(
         login=login,
         sign_in=sign_in,
@@ -143,3 +144,19 @@ def build_mcp(
     )
     server = FastMCP(name, instructions=instructions, auth=auth)
     return RemoteMCP(server=server, path=path, _resolve=resolve)
+
+
+_LOOPBACK = {"localhost", "127.0.0.1", "::1"}
+
+
+def _secure_base_url(base_url: str) -> bool:
+    """https, or http on a loopback host (local development). Parsed, not substring-matched:
+    `http://localhost.evil.test` and `http://host/?x=://localhost` are refused."""
+    try:
+        parts = urlsplit(base_url)
+        host = parts.hostname
+    except ValueError:
+        return False
+    if not host or parts.username is not None or parts.password is not None:
+        return False
+    return parts.scheme == "https" or (parts.scheme == "http" and host in _LOOPBACK)

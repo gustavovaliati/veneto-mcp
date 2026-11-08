@@ -94,6 +94,14 @@ restart, nothing to stream), but turn proxy buffering off for it anyway.
   `/token`, the provider's callback). Dynamic Client Registration is open to anyone, by design.
   A registration that no sign-in completes with is deleted after an hour; a used one lives as
   long as its refresh token could, renewed on every refresh.
+- **Cap the request body size there too** (for example `client_max_body_size 16k` on
+  `/register`): a rate limit counts requests, not bytes, and a registration's `client_name`
+  and redirect URIs are stored as sent.
+- **Use `encrypted(...)` storage.** `build_mcp` accepts any store, and a plain one keeps your
+  grants (API tokens, say) in clear text.
+- **A grant `sign_in` returns may never be used.** If the person abandons the flow, or the
+  client never redeems its code (5 minutes), nothing points at the grant any more. Mint grants
+  that expire, or replace the previous grant of the same client, as you would any token.
 - **`ConnectorClient.name` is chosen by whoever registered the client.** Treat it as untrusted
   text: escape it before showing it, and never use it to decide anything.
 - **Keep the `fastmcp` logger above DEBUG in production.** At DEBUG, FastMCP logs full
